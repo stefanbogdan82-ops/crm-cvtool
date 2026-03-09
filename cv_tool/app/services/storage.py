@@ -1,7 +1,7 @@
 import os
 import uuid
 from pathlib import Path
-from app.core.config import settings
+from cv_tool.app.core.config import settings
 
 class LocalStorage:
     def __init__(self, base_dir: str):

@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+
+cv_tool/app/storage/
+storage/
+
+.venv/
+__pycache__/
+*.pyc

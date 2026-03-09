@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.db.session import get_db
-from app.db.models import Job
+from cv_tool.app.db.session import get_db
+from cv_tool.app.db.models import Job
 
 router = APIRouter(prefix="/v1/jobs", tags=["jobs"])
 

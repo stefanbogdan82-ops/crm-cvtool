@@ -1,6 +1,6 @@
 import hashlib
 from sqlalchemy.orm import Session
-from app.db import models
+from cv_tool.app.db import models
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
