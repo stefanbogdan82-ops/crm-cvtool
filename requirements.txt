@@ -6,4 +6,8 @@ pydantic-settings
 python-docx
 jinja2
 docxtpl
-fitz
+pymupdf
+psycopg[binary]
+python-multipart
+openai 
+pydantic-settings

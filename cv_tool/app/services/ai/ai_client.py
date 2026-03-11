@@ -1,4 +1,7 @@
-# ai_client.py
-class AIClient:
-    def generate_summary(self, text: str) -> str:
-        raise NotImplementedError()
+from abc import ABC, abstractmethod
+
+
+class AIClient(ABC):
+    @abstractmethod
+    def enrich(self, cv_text: str) -> dict:
+        raise NotImplementedError

@@ -1,9 +1,14 @@
-# app/services/render/docx_renderer.py
+from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
+from typing import Any
+
 from docxtpl import DocxTemplate
+
 from cv_tool.app.core.config import settings
 from cv_tool.app.services.render.dates import make_period_label
+
 
 TECH_GROUP_ORDER = [
     "cicd",
@@ -15,60 +20,219 @@ TECH_GROUP_ORDER = [
     "reporting",
     "other",
 ]
-ORDER_INDEX = {k: i for i, k in enumerate(TECH_GROUP_ORDER)}
 
-def _prepare_context(cv_json: dict) -> dict:
-    ctx = dict(cv_json)
+ORDER_INDEX = {key: index for index, key in enumerate(TECH_GROUP_ORDER)}
 
-    # 1) Work experience compact: ensure period_label, optional sorting
-    we = list(ctx.get("work_experience_compact", []))
-    for item in we:
-        if not item.get("period_label"):
-            item["period_label"] = make_period_label(item.get("start_date"), item.get("end_date"))
-        # normalize end_date presentation in template via period_label; template uses period_label already
 
-    # Sort by start_date desc when present
-    def we_sort_key(x):
-        sd = x.get("start_date") or ""
-        return sd
-    we.sort(key=we_sort_key, reverse=True)
-    ctx["work_experience_compact"] = we[:6]  # enforce max 6 like your template
+def _resolve_template_path(template_version: str) -> Path:
+    """
+    Resolve the template path from configured template_dir.
 
-    # 2) Technologies: enforce ordering by group_key
-    tech = list(ctx.get("technologies", []))
-    tech.sort(key=lambda g: ORDER_INDEX.get(g.get("group_key", "other"), 999))
-    ctx["technologies"] = tech
+    Example:
+        template_dir = ./cv_tool/app/templates
+        template_version = company-v1
+        -> cv_tool/app/templates/company-v1.docx
+    """
+    if not settings.template_dir:
+        raise ValueError("settings.template_dir is empty or not configured.")
 
-    # 3) Projects: ensure period_label exists, sort by project_end desc then start desc
-    pe = list(ctx.get("project_experience", []))
-    for p in pe:
-        if not p.get("period_label"):
-            p["period_label"] = make_period_label(p.get("project_start"), p.get("project_end"))
+    template_dir = Path(settings.template_dir).resolve()
+    template_path = template_dir / f"{template_version}.docx"
 
-    def proj_sort_key(p):
-        endd = p.get("project_end") or "9999-99"  # ongoing first
-        startd = p.get("project_start") or ""
-        return (endd, startd)
-
-    pe.sort(key=proj_sort_key, reverse=True)
-    ctx["project_experience"] = pe
-
-    # 4) Enforce no contact keys sneaking into template context
-    # (template won’t reference them, but we keep it clean)
-    # Your schema already omits them; validation also forbids them.
-
-    return ctx
-
-def render_company_docx(cv_json: dict, template_version: str = "company-v1") -> bytes:
-    template_path = Path(settings.template_dir) / f"{template_version}.docx"
     if not template_path.exists():
         raise FileNotFoundError(f"Template not found: {template_path}")
 
-    tpl = DocxTemplate(str(template_path))
-    context = _prepare_context(cv_json)
-    tpl.render(context)
+    if not template_path.is_file():
+        raise FileNotFoundError(f"Template path is not a file: {template_path}")
 
-    from io import BytesIO
-    buf = BytesIO()
-    tpl.save(buf)
-    return buf.getvalue()
+    return template_path
+
+
+def _copy_list_of_dicts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Create a shallow copy of a list of dicts so we do not mutate the caller's input.
+    """
+    return [dict(item) for item in items if isinstance(item, dict)]
+
+
+def _to_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _to_str_list(value: Any) -> list[str]:
+    out: list[str] = []
+    for item in _to_list(value):
+        if item is None:
+            continue
+        s = str(item).strip()
+        if s:
+            out.append(s)
+    return out
+
+
+def _safe_nested_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
+
+
+def _prepare_work_experience(ctx: dict[str, Any]) -> None:
+    work_experience = _copy_list_of_dicts(ctx.get("work_experience_compact", []))
+
+    prepared: list[dict[str, Any]] = []
+    for item in work_experience:
+        prepared_item = {
+            "company": str(item.get("company", "") or ""),
+            "job_title": str(item.get("job_title", "") or ""),
+            "start_date": str(item.get("start_date", "") or ""),
+            "end_date": str(item.get("end_date", "") or ""),
+            "period_label": str(item.get("period_label", "") or ""),
+        }
+
+        if not prepared_item["period_label"]:
+            prepared_item["period_label"] = make_period_label(
+                prepared_item["start_date"],
+                prepared_item["end_date"],
+            )
+
+        prepared.append(prepared_item)
+
+    def work_experience_sort_key(item: dict[str, Any]) -> str:
+        return item.get("start_date") or ""
+
+    prepared.sort(key=work_experience_sort_key, reverse=True)
+
+    ctx["work_experience_compact"] = prepared[:6]
+
+
+def _prepare_technologies(ctx: dict[str, Any]) -> None:
+    """
+    Prepare technologies for templating.
+
+    Important:
+    We expose both:
+    - items: original canonical key
+    - tech_items: template-safe alias
+
+    In DOCX/Jinja templates, dict.items can collide with the built-in dict method,
+    so template code should prefer tech.tech_items instead of tech.items.
+    """
+    technologies = _copy_list_of_dicts(ctx.get("technologies", []))
+
+    prepared: list[dict[str, Any]] = []
+    for group in technologies:
+        group_key = str(group.get("group_key", "other") or "other")
+        group_label = str(group.get("group_label", "") or "")
+        items = _to_str_list(group.get("items", []))
+
+        prepared.append({
+            "group_key": group_key,
+            "group_label": group_label or group_key.replace("_", " ").title(),
+            "items": items,
+            "tech_items": items,
+        })
+
+    prepared.sort(
+        key=lambda group: ORDER_INDEX.get(group.get("group_key", "other"), 999)
+    )
+
+    ctx["technologies"] = prepared
+
+
+def _prepare_projects(ctx: dict[str, Any]) -> None:
+    project_experience = _copy_list_of_dicts(ctx.get("project_experience", []))
+
+    prepared: list[dict[str, Any]] = []
+    for project in project_experience:
+        project_target = _safe_nested_dict(project.get("project_target"))
+
+        prepared_project = {
+            "period_label": str(project.get("period_label", "") or ""),
+            "project_name": str(project.get("project_name", "") or ""),
+            "project_start": str(project.get("project_start", "") or ""),
+            "project_end": str(project.get("project_end", "") or ""),
+            "industry": _to_str_list(project.get("industry", [])),
+            "project_target": {
+                "description": str(project_target.get("description", "") or "")
+            },
+            "responsibilities": _to_str_list(project.get("responsibilities", [])),
+            "roles": _to_str_list(project.get("roles", [])),
+            "skills": _to_str_list(project.get("skills", [])),
+        }
+
+        if not prepared_project["period_label"]:
+            prepared_project["period_label"] = make_period_label(
+                prepared_project["project_start"],
+                prepared_project["project_end"],
+            )
+
+        prepared.append(prepared_project)
+
+    def project_sort_key(project: dict[str, Any]) -> tuple[str, str]:
+        project_end = project.get("project_end") or "9999-99"
+        project_start = project.get("project_start") or ""
+        return project_end, project_start
+
+    prepared.sort(key=project_sort_key, reverse=True)
+    ctx["project_experience"] = prepared
+
+
+def _prepare_simple_lists(ctx: dict[str, Any]) -> None:
+    for key in [
+        "academic_qualifications",
+        "main_skills",
+        "languages_spoken",
+        "certifications",
+        "industries",
+    ]:
+        if key not in ctx:
+            continue
+
+        value = ctx.get(key)
+
+        if key in {"main_skills", "industries"}:
+            ctx[key] = _to_str_list(value)
+        elif isinstance(value, list):
+            ctx[key] = value
+        else:
+            ctx[key] = []
+
+
+def _prepare_context(cv_json: dict[str, Any]) -> dict[str, Any]:
+    """
+    Prepare a safe rendering context for the DOCX template.
+    """
+    context = dict(cv_json or {})
+
+    _prepare_simple_lists(context)
+    _prepare_work_experience(context)
+    _prepare_technologies(context)
+    _prepare_projects(context)
+
+    # Keep context clean even if upstream accidentally injects contact-like keys.
+    for forbidden_key in ("email", "phone", "mobile", "address", "linkedin", "website", "contact"):
+        context.pop(forbidden_key, None)
+
+    return context
+
+
+def render_company_docx(cv_json: dict[str, Any], template_version: str = "company-v1") -> bytes:
+    """
+    Render the configured company DOCX template using the provided CV JSON.
+    Returns the rendered document as bytes.
+    """
+    template_path = _resolve_template_path(template_version)
+    context = _prepare_context(cv_json)
+
+    template = DocxTemplate(str(template_path))
+    template.render(context)
+
+    buffer = BytesIO()
+    template.save(buffer)
+    buffer.seek(0)
+
+    return buffer.getvalue()

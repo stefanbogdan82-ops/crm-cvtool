@@ -1,16 +1,18 @@
 from pathlib import Path
 
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
+from fastapi import HTTPException
+from openai import RateLimitError
 from sqlalchemy.orm import Session
 
-from app.db.session import get_db
-from app.db import repo
-from app.services.storage import storage
-from app.services.extract.docx_extractor import extract_text_from_docx
-from app.services.extract.pdf_extractor import extract_text_from_pdf, looks_like_scanned_pdf
-from app.services.ai.client import get_ai_client
-from app.services.ai.prompts import PROMPT_VERSION
-from app.services.render.docx_renderer import render_company_docx
+from cv_tool.app.db.session import get_db
+from cv_tool.app.db import repo
+from cv_tool.app.services.storage import storage
+from cv_tool.app.services.extract.docx_extractor import extract_text_from_docx
+from cv_tool.app.services.extract.pdf_extractor import extract_text_from_pdf, looks_like_scanned_pdf
+from cv_tool.app.services.ai.client import get_ai_client
+from cv_tool.app.services.ai.prompts import PROMPT_VERSION
+from cv_tool.app.services.render.docx_renderer import render_company_docx
 
 router = APIRouter(prefix="/v1/cv", tags=["cv"])
 
@@ -42,6 +44,23 @@ def _detect_file_kind(file: UploadFile) -> str | None:
 
     return None
 
+@router.get("/revisions/{revision_id}")
+def get_revision(revision_id: str, db: Session = Depends(get_db)):
+    from cv_tool.app.db.models import CVRevision
+
+    rev = db.get(CVRevision, revision_id)
+    if not rev:
+        raise HTTPException(status_code=404, detail="Revision not found")
+
+    return {
+        "id": str(rev.id),
+        "schema_version": rev.schema_version,
+        "parser_version": rev.parser_version,
+        "ai_prompt_version": rev.ai_prompt_version,
+        "cv_json": rev.cv_json,
+        "created_at": rev.created_at,
+    }
+
 
 @router.post("/upload")
 async def upload_cv(file: UploadFile = File(...), db: Session = Depends(get_db)):
@@ -64,7 +83,12 @@ async def upload_cv(file: UploadFile = File(...), db: Session = Depends(get_db))
             raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
         sha = repo.sha256_bytes(raw)
-        saved_path = storage.save_bytes(raw, "originals", file.filename or "uploaded_cv")
+        saved_path = storage.save_bytes(
+            raw,
+            subdir="originals",
+            filename=file.filename or "uploaded_cv.docx",
+            suffix="source",
+        )
 
         doc = repo.create_document(
             db,
@@ -106,8 +130,42 @@ async def upload_cv(file: UploadFile = File(...), db: Session = Depends(get_db))
 
         # AI enrich / normalize
         ai = get_ai_client()
-        ai_out = ai.enrich(text)
+
+        try:
+            ai_out = ai.enrich(text)
+        except RateLimitError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="OpenAI quota unavailable. Check API billing, credits, and project limits."
+             ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"AI output could not be normalized: {str(exc)}"
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Unexpected AI processing error: {str(exc)}"
+            ) from exc
+
         cv_json = ai_out["cv_json"]
+
+        try:
+            rendered_bytes = render_company_docx(
+                cv_json,
+                template_version="company-v1",
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"DOCX template not found: {str(exc)}"
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"DOCX rendering failed: {str(exc)}"
+            ) from exc
 
         # Save revision
         rev = repo.create_revision(
@@ -117,15 +175,11 @@ async def upload_cv(file: UploadFile = File(...), db: Session = Depends(get_db))
             ai_prompt_version=PROMPT_VERSION,
         )
 
-        # Render DOCX using company template
-        rendered_bytes = render_company_docx(
-            cv_json,
-            template_version="company-v1",
-        )
         rendered_path = storage.save_bytes(
             rendered_bytes,
-            "rendered",
-            f"{file.filename or 'cv'}.company-v1.docx",
+            subdir="rendered",
+            filename=file.filename or "cv.docx",
+         suffix="company-v1",
         )
 
         repo.create_rendered(
@@ -153,5 +207,7 @@ async def upload_cv(file: UploadFile = File(...), db: Session = Depends(get_db))
         raise
     except Exception as e:
         repo.update_job(db, job, "failed", error=str(e))
+        import traceback
+        print(traceback.format_exc())
         raise HTTPException(status_code=500, detail="Internal error")
     

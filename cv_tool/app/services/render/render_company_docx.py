@@ -2,8 +2,8 @@
 
 from pathlib import Path
 from docxtpl import DocxTemplate
-from app.core.config import settings
-from app.services.render.dates import make_period_label
+from cv_tool.app.core.config import settings
+from cv_tool.app.services.render.dates import make_period_label
 
 TECH_GROUP_ORDER = [
     "cicd",
