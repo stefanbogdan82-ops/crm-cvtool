@@ -8,3 +8,6 @@ storage/
 .venv/
 __pycache__/
 *.pyc
+*.log
+.vscode/
+.idea/
