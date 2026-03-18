@@ -1,0 +1,43 @@
+1️⃣ Go to the project root
+cd C:\Proiecte\crm-cvtool
+
+ Check repository status
+git status
+
+2️⃣ Stage the changes
+
+Stage everything:
+
+git add .
+
+3️⃣ Create a commit
+git commit -m "Improve storage naming, fix template path, stabilize CV rendering pipeline"
+
+4️⃣ Check which branch you are on
+git branch
+
+Typical output:
+* main
+or
+* master
+
+5️⃣ Push to the remote repository
+git push origin main
+or if your branch is master:
+git push origin master
+
+6️⃣ If the remote is not set yet
+
+Check remotes:
+git remote -v
+
+If nothing appears, add it:
+git remote add origin https://github.com/youruser/yourrepo.git
+
+Then push:
+git push -u origin main
+
+7️⃣ Verify everything
+git status
+Expected:
+nothing to commit, working tree clean
